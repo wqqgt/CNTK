@@ -76,7 +76,7 @@ namespace CNTK
         std::unordered_map<Variable, ValuePtr> minibatch;
         bool shouldTrain = true;
         size_t workerRank = 0, numberOfWorkers = 1;
-        size_t samplesInEpoch = 0;
+        size_t lastCheckpointSamplesSeen = 0;
         while (shouldTrain)
         {
             // Check if we are operating in distributed mode.
@@ -100,24 +100,24 @@ namespace CNTK
             shouldTrain = m_trainer->TrainMinibatch(minibatch, computeDevice);
             OnMinibatchEnd();
 
-            // Local number of samples.
-            samplesInEpoch += m_trainer->PreviousMinibatchSampleCount();
-
             // Check whether to create a checkpoint
             if (m_checkpointFrequencyinSamples > 0)
             {
                 size_t checkpointIndex = m_trainer->TotalNumberOfSamplesSeen() / m_checkpointFrequencyinSamples;
                 if (checkpointIndex > m_currentCheckpointIndex)
                 {
-                    samplesInEpoch = 0;
                     m_currentCheckpointIndex = checkpointIndex;
                     SaveCheckpoint();
+                    lastCheckpointSamplesSeen = m_trainer->TotalNumberOfSamplesSeen();
                 }
             }
         }
 
-        if (m_checkpointFrequencyinSamples > 0)
+        if (m_checkpointFrequencyinSamples > 0 && lastCheckpointSamplesSeen != m_trainer->TotalNumberOfSamplesSeen())
+        {
+            // There was still some training, let's save it.
             SaveCheckpoint();
+        }
     }
 
     void TrainingSession::RestoreFromCheckpoint(const std::wstring& checkpointFileName)
