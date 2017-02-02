@@ -39,7 +39,7 @@ class TrainingSession(cntk_py.TrainingSession):
         if self.progress_printer and self.trainer.total_number_of_samples_seen != 0:
             self.progress_printer.update_with_trainer(self.trainer, with_metric=True)
 
-    def on_checkpoint_end(self):
+    def on_checkpoint_end(self, index):
         if self.progress_printer:
             self.progress_printer.epoch_summary(with_metric=True)
 
