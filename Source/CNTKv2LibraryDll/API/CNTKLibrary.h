@@ -4412,7 +4412,9 @@ namespace CNTK
             const std::unordered_map<Variable, StreamInformation>& modelInputToMinibatchSourceStream,
             const TrainingParameterPerUnitSchedule<size_t, TrainingParameterSchedule<size_t>::UnitType::Sample>& minibatchSizeSchedule,
             size_t checkpointFrequencyInSamples,
-            const std::wstring& checkPointFileName);
+            const std::wstring& checkPointFileName,
+            bool resoreFromCheckpointIfExists = true,
+            size_t maxNumberOfSamples = std::numeric_limits<size_t>::max());
 
         ///
         /// Runs the session.
@@ -4468,6 +4470,7 @@ namespace CNTK
         /// Disallow copy and move construction and assignment
         TrainingSession(const TrainingSession&) = delete; TrainingSession& operator=(const TrainingSession&) = delete; TrainingSession& operator=(TrainingSession&&) = delete; TrainingSession(TrainingSession&&) = delete;
 
+        void Restore();
         void SaveCheckpoint();
 
         static const std::wstring s_checkpointIndex;
@@ -4484,6 +4487,8 @@ namespace CNTK
         size_t m_workerRank;
         size_t m_numberOfWorkers;
         const MinibatchSizeSchedule m_minibatchSizeSchedule;
+        const size_t m_maxNumberOfSamples;
+        const bool m_restoreFromCheckpointIfExists;
     };
 
     CNTK_API TrainingSessionPtr CreateBasicTrainingSession(
