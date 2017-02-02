@@ -17,6 +17,12 @@ namespace CNTK
     const static std::wstring s_checkpointIndex = L"CheckpointIndex";
     const static std::wstring s_trainingMinibatchSource = L"TrainingMinibatchSource";
 
+    inline bool isNumber(const std::wstring& s)
+    {
+        return !s.empty() &&
+            find_if(s.begin(), s.end(), [](wchar_t c) { return !isdigit(c); }) == s.end();
+    }
+
     TrainingSessionPtr CreateBasicTrainingSession(
         const MinibatchSourcePtr& trainingSource,
         const TrainerPtr& trainer,
@@ -40,8 +46,8 @@ namespace CNTK
         const MinibatchSizeSchedule& schedule,
         size_t checkpointFrequencyInSamples,
         const std::wstring& checkPointFileName,
-        const MinibatchSourcePtr& crossValidationSource = nullptr,
-        size_t crossValidationFrequencyInSamples = 0,
+        const MinibatchSourcePtr& crossValidationSource,
+        size_t crossValidationFrequencyInSamples,
         bool restoreFromCheckpointIfExists,
         bool saveAllCheckpoints,
         size_t maxNumberOfSamples) :
@@ -89,12 +95,6 @@ namespace CNTK
         }
     }
 
-    inline bool isNumber(const std::wstring& s)
-    {
-        return !s.empty() && 
-            find_if(s.begin(), s.end(), [](wchar_t c) { return !isdigit(c); }) == s.end();
-    }
-
     void TrainingSession::Train(const DeviceDescriptor& computeDevice)
     {
         std::unordered_map<Variable, ValuePtr> minibatch;
@@ -122,7 +122,7 @@ namespace CNTK
             PerformCheckPointIfNeeded();
 
             // Check whether to perform cross validation
-            PerformCrossValidationIfNeeded();
+            PerformCrossValidationIfNeeded(computeDevice);
         }
 
         if (m_checkpointFrequencyinSamples > 0)
@@ -161,7 +161,7 @@ namespace CNTK
         SaveCheckpoint(false);
     }
 
-    inline void TrainingSession::PerformCrossValidationIfNeeded()
+    inline void TrainingSession::PerformCrossValidationIfNeeded(const DeviceDescriptor& computeDevice)
     {
         if (m_crossValidationFrequencyInSamples == 0)
             return;
@@ -172,7 +172,7 @@ namespace CNTK
 
         // Perform cross validation
         m_currentCrossValidationIndex = crossValidationIndex;
-        CrossValidate();
+        CrossValidate(computeDevice);
     }
 
     void TrainingSession::GetTrainingMinibatch(std::unordered_map<Variable, ValuePtr>& minibatch, const DeviceDescriptor& computeDevice)

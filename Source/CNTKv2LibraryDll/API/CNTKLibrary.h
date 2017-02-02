@@ -4493,7 +4493,7 @@ namespace CNTK
         void CrossValidate(const DeviceDescriptor& computeDevice);
 
         inline void PerformCheckPointIfNeeded();
-        inline void PerformCrossValidationIfNeeded();
+        inline void PerformCrossValidationIfNeeded(const DeviceDescriptor& computeDevice);
 
         // Checkpointing
         const size_t m_checkpointFrequencyinSamples;
