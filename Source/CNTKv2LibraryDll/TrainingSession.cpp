@@ -41,6 +41,7 @@ namespace CNTK
         size_t checkpointFrequencyInSamples,
         const std::wstring& checkPointFileName,
         bool restoreFromCheckpointIfExists,
+        bool saveAllCheckpoints,
         size_t maxNumberOfSamples) :
         m_trainingSource(trainingSource),
         m_trainer(trainer),
@@ -53,7 +54,8 @@ namespace CNTK
         m_numberOfWorkers(1),
         m_minibatchSizeSchedule(schedule),
         m_maxNumberOfSamples(maxNumberOfSamples),
-        m_restoreFromCheckpointIfExists(restoreFromCheckpointIfExists)
+        m_restoreFromCheckpointIfExists(restoreFromCheckpointIfExists),
+        m_saveAllCheckpoints(saveAllCheckpoints)
     {
         if (!trainingSource)
             InvalidArgument("Minibatch source is not allowed to be null.");
@@ -138,16 +140,16 @@ namespace CNTK
                 if (checkpointIndex > m_currentCheckpointIndex)
                 {
                     m_currentCheckpointIndex = checkpointIndex;
-                    SaveCheckpoint();
+                    SaveCheckpoint(false);
                     lastCheckpointSamplesSeen = m_trainer->TotalNumberOfSamplesSeen();
                 }
             }
         }
 
-        if (m_checkpointFrequencyinSamples > 0 && lastCheckpointSamplesSeen != m_trainer->TotalNumberOfSamplesSeen())
+        if (m_checkpointFrequencyinSamples > 0)
         {
-            // There was still some training, let's save it.
-            SaveCheckpoint();
+            // Save the last checkpoint.
+            SaveCheckpoint(true);
         }
     }
 
@@ -158,12 +160,16 @@ namespace CNTK
         m_trainingSource->RestoreFromCheckpoint(externalState[s_trainingMinibatchSource].Value<Dictionary>());
     }
 
-    void TrainingSession::SaveCheckpoint()
+    void TrainingSession::SaveCheckpoint(bool last)
     {
         OnCheckpointStart();
         Dictionary externalState;
         externalState[s_checkpointIndex] = m_currentCheckpointIndex;
         externalState[s_trainingMinibatchSource] = m_trainingSource->GetCheckpointState();
+
+        wstring checkpointFile = m_checkPointFileName;
+        if (m_saveAllCheckpoints && !last)
+            checkpointFile += std::to_wstring(m_currentCheckpointIndex);
         m_trainer->SaveCheckpoint(m_checkPointFileName, externalState);
         OnCheckpointEnd();
     }
