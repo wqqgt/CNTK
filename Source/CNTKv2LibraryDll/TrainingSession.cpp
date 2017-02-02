@@ -50,13 +50,12 @@ namespace CNTK
         size_t crossValidationFrequencyInSamples,
         bool restoreFromCheckpointIfExists,
         bool saveAllCheckpoints,
-        size_t maxNumberOfSamples) :
+        size_t maxNumberOfSamples,
+        size_t progressFrequencyInSamples) :
         m_trainingSource(trainingSource),
         m_trainer(trainer),
         m_modelInputToMinibatchSourceStream(modelInputToMinibatchSourceStream),
-        m_checkpointFrequencyinSamples(checkpointFrequencyInSamples),
         m_checkPointFileName(checkPointFileName),
-        m_currentCheckpointIndex(0),
         m_parallelAfterSamples(0),
         m_workerRank(0),
         m_numberOfWorkers(1),
@@ -64,9 +63,7 @@ namespace CNTK
         m_maxNumberOfSamples(maxNumberOfSamples),
         m_restoreFromCheckpointIfExists(restoreFromCheckpointIfExists),
         m_saveAllCheckpoints(saveAllCheckpoints),
-        m_crossValidationFrequencyInSamples(crossValidationFrequencyInSamples),
-        m_crossValidationSource(crossValidationSource),
-        m_currentCrossValidationIndex(0)
+        m_crossValidationSource(crossValidationSource)
     {
         if (!trainingSource)
             InvalidArgument("Training minibatch source is not allowed to be null.");
@@ -93,6 +90,19 @@ namespace CNTK
                 m_numberOfWorkers = distributed->GetCommunicator()->Workers().size();
             }
         }
+
+        // Fill-in required actions.
+        if (checkpointFrequencyInSamples != 0)
+            m_actions.push_back({ checkpointFrequencyInSamples, 0,
+                [this](size_t currentIndex, const DeviceDescriptor&) { SaveCheckpoint(currentIndex); } });
+
+        if(crossValidationFrequencyInSamples != 0)
+            m_actions.push_back({ crossValidationFrequencyInSamples, 0,
+                [this](size_t currentIndex, const DeviceDescriptor& d) { CrossValidate(currentIndex, d); } });
+
+        if (progressFrequencyInSamples != 0)
+            m_actions.push_back({ progressFrequencyInSamples, 0,
+                [this](size_t currentIndex, const DeviceDescriptor&) { ReportProgress(currentIndex); } });
     }
 
     void TrainingSession::Train(const DeviceDescriptor& computeDevice)
@@ -101,8 +111,12 @@ namespace CNTK
         bool shouldTrain = m_maxNumberOfSamples > 0;
 
         // Let's try to restore if required.
+        size_t restoredNumberOfSamples = 0;
         if (m_restoreFromCheckpointIfExists)
+        {
             RestoreCheckpoint();
+            restoredNumberOfSamples = m_trainer->TotalNumberOfSamplesSeen();
+        }
 
         // Main train loop.
         while (shouldTrain)
@@ -118,21 +132,35 @@ namespace CNTK
             shouldTrain = m_trainer->TrainMinibatch(minibatch, computeDevice);
             OnMinibatchEnd();
 
-            // Check whether to create a checkpoint
-            PerformCheckPointIfNeeded();
-
-            // Check whether to perform cross validation
-            PerformCrossValidationIfNeeded(computeDevice);
+            // Peform actions if required.
+            size_t totalNumberOfSamples = m_trainer->TotalNumberOfSamplesSeen();
+            for (auto& action : m_actions)
+            {
+                size_t index = totalNumberOfSamples / action.frequency;
+                if (index != action.currentIndex)
+                {
+                    action.action(action.currentIndex, computeDevice);
+                    action.currentIndex = index;
+                }
+            }
         }
 
-        if (m_checkpointFrequencyinSamples > 0)
+        if (restoredNumberOfSamples != m_trainer->TotalNumberOfSamplesSeen())
         {
-            // Always save the last checkpoint.
-            SaveCheckpoint(true);
+            // Let's do all actions on the last probably a partial data at the end.
+            for (size_t i = 0; i < m_actions.size(); i++)
+            {
+                if (m_trainer->TotalNumberOfSamplesSeen() % m_actions[i].frequency != 0)
+                    m_actions[i].action(m_actions[i].currentIndex + 1, computeDevice);
+            }
         }
+
+        // In case of incremental - save final checkpoint.
+        if (m_saveAllCheckpoints && !boost::filesystem::exists(m_checkPointFileName))
+            SaveFinalCheckpoint();
     }
 
-    void TrainingSession::CrossValidate(const DeviceDescriptor& computeDevice)
+    void TrainingSession::CrossValidate(size_t currentIndex, const DeviceDescriptor& computeDevice)
     {
         std::unordered_map<Variable, ValuePtr> minibatch;
 
@@ -144,35 +172,12 @@ namespace CNTK
             numberOfMinibatches++;
         }
 
-        OnCrossValidationEnd(m_currentCrossValidationIndex, accumulatedError/numberOfMinibatches);
+        OnCrossValidationEnd(currentIndex, accumulatedError/numberOfMinibatches);
     }
 
-    inline void TrainingSession::PerformCheckPointIfNeeded()
+    inline void TrainingSession::ReportProgress(size_t currentIndex)
     {
-        if (m_checkpointFrequencyinSamples == 0)
-            return;
-
-        size_t checkpointIndex = m_trainer->TotalNumberOfSamplesSeen() / m_checkpointFrequencyinSamples;
-        if (checkpointIndex <= m_currentCheckpointIndex)
-            return; // Nothing to do.
-
-        // Perform the checkpoint.
-        m_currentCheckpointIndex = checkpointIndex;
-        SaveCheckpoint(false);
-    }
-
-    inline void TrainingSession::PerformCrossValidationIfNeeded(const DeviceDescriptor& computeDevice)
-    {
-        if (m_crossValidationFrequencyInSamples == 0)
-            return;
-
-        size_t crossValidationIndex = m_trainer->TotalNumberOfSamplesSeen() / m_crossValidationFrequencyInSamples;
-        if (crossValidationIndex <= m_currentCrossValidationIndex)
-            return; // Nothing to do.
-
-        // Perform cross validation
-        m_currentCrossValidationIndex = crossValidationIndex;
-        CrossValidate(computeDevice);
+        this->OnProgress(currentIndex);
     }
 
     void TrainingSession::GetTrainingMinibatch(std::unordered_map<Variable, ValuePtr>& minibatch, const DeviceDescriptor& computeDevice)
@@ -210,72 +215,83 @@ namespace CNTK
     void TrainingSession::RestoreFromCheckpoint(const std::wstring& checkpointFileName)
     {
         Dictionary externalState = m_trainer->RestoreFromCheckpoint(checkpointFileName);
-        m_currentCheckpointIndex = externalState[s_checkpointIndex].Value<size_t>();
         m_trainingSource->RestoreFromCheckpoint(externalState[s_trainingMinibatchSource].Value<Dictionary>());
     }
 
-    void TrainingSession::SaveCheckpoint(bool last)
+    void TrainingSession::SaveCheckpoint(size_t currentIndex)
     {
-        OnCheckpointStart(m_currentCheckpointIndex);
+        OnCheckpointStart(currentIndex);
         Dictionary externalState;
-        externalState[s_checkpointIndex] = m_currentCheckpointIndex;
         externalState[s_trainingMinibatchSource] = m_trainingSource->GetCheckpointState();
 
         wstring checkpointFile = m_checkPointFileName;
-        if (m_saveAllCheckpoints && !last)
-            checkpointFile += std::to_wstring(m_currentCheckpointIndex);
+        if (m_saveAllCheckpoints)
+            checkpointFile += std::to_wstring(currentIndex);
         m_trainer->SaveCheckpoint(m_checkPointFileName, externalState);
-        OnCheckpointEnd(m_currentCheckpointIndex);
+        OnCheckpointEnd(currentIndex);
+    }
+
+    void TrainingSession::SaveFinalCheckpoint()
+    {
+        Dictionary externalState;
+        externalState[s_trainingMinibatchSource] = m_trainingSource->GetCheckpointState();
+        m_trainer->SaveCheckpoint(m_checkPointFileName, externalState);
     }
 
     void TrainingSession::RestoreCheckpoint()
     {
+        using namespace boost::filesystem;
+
         // Make sure the intermediate directories exist, so no need for further checks.
         msra::files::make_intermediate_dirs(m_checkPointFileName);
 
-        // Best or single checkpoint found - simply resoring from it.
-        if (boost::filesystem::exists(m_checkPointFileName))
+        std::wstring restoreFile;
+        if (exists(m_checkPointFileName))
         {
-            this->RestoreFromCheckpoint(m_checkPointFileName);
+            restoreFile = m_checkPointFileName;
+        }
+        else
+        {
+            // let's check whether there are other possible candidates to restore from.
+            int maxValue = -1;
+            auto d = wpath(m_checkPointFileName).parent_path();
+            for (directory_iterator itr(d); itr != directory_iterator(); ++itr)
+            {
+                if (!is_regular_file(itr->status()) ||
+                    !boost::starts_with(itr->path().c_str(), m_checkPointFileName))
+                {
+                    continue;
+                }
+
+                std::wstring filePath = itr->path().c_str();
+                auto suffix = filePath.substr(m_checkPointFileName.size());
+                if (!isNumber(suffix) || !boost::filesystem::exists(filePath + L".ckp"))
+                {
+                    continue;
+                }
+
+                auto expectedNumber = msra::strfun::utf8(suffix);
+                char* tmp;
+                int value = strtol(expectedNumber.c_str(), &tmp, 10);
+                assert(tmp == expectedNumber.c_str() + expectedNumber.size());
+
+                if (value > maxValue)
+                {
+                    // Found a better candidate.
+                    maxValue = value;
+                    restoreFile = filePath;
+                }
+            }
+        }
+
+        if (restoreFile.empty()) // Nothing to restore.
             return;
-        }
 
-        // If not - let's check whether there are other possible candidates to restore from.
-        using namespace boost::filesystem;
+        this->RestoreFromCheckpoint(restoreFile);
 
-        int maxValue = -1;
-        wstring candidate;
-        auto d = wpath(m_checkPointFileName).parent_path();
-        for (directory_iterator itr(d); itr != directory_iterator(); ++itr)
-        {
-            if (!is_regular_file(itr->status()) ||
-                !boost::starts_with(itr->path().c_str(), m_checkPointFileName))
-            {
-                continue;
-            }
-
-            std::wstring filePath = itr->path().c_str();
-            auto suffix = filePath.substr(m_checkPointFileName.size());
-            if (!isNumber(suffix) || !boost::filesystem::exists(filePath + L".ckp"))
-            {
-                continue;
-            }
-
-            auto expectedNumber = msra::strfun::utf8(suffix);
-            char* tmp;
-            int value = strtol(expectedNumber.c_str(), &tmp, 10);
-            assert(tmp == expectedNumber.c_str() + expectedNumber.size());
-
-            if (value > maxValue)
-            {
-                // Found a better candidate.
-                maxValue = value;
-                candidate = filePath;
-            }
-        }
-
-        // Restoring from the candidate.
-        if (!candidate.empty())
-            this->RestoreFromCheckpoint(candidate);
+        // Recalculate actions indicies.
+        size_t totalNumberOfSamples = m_trainer->TotalNumberOfSamplesSeen();
+        for (auto& action : m_actions)
+            action.currentIndex = totalNumberOfSamples / action.frequency;
     }
 }

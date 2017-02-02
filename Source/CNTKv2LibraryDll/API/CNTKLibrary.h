@@ -4405,6 +4405,13 @@ namespace CNTK
     ///
     class TrainingSession
     {
+        struct PeriodicAction
+        {
+            size_t frequency;
+            size_t currentIndex;
+            std::function<void(size_t currentIndex, const DeviceDescriptor&)> action;
+        };
+
     public:
         CNTK_API TrainingSession(
             const MinibatchSourcePtr& trainingSource,
@@ -4417,7 +4424,8 @@ namespace CNTK
             size_t crossValidationFrequencyInSamples = 0,
             bool restoreFromCheckpointIfExists = true,
             bool saveAllCheckpoints = false,
-            size_t maxNumberOfSamples = std::numeric_limits<size_t>::max());
+            size_t maxNumberOfSamples = std::numeric_limits<size_t>::max(),
+            size_t progressFrequencyInSamples = 0);
 
         ///
         /// Runs the session.
@@ -4471,6 +4479,11 @@ namespace CNTK
         ///
         CNTK_API virtual void OnCrossValidationEnd(size_t /*validationIndex*/, double /*averageError*/) {};
 
+        ///
+        /// Optionally overridable callback that is invoked with progress frequency.
+        ///
+        CNTK_API virtual void OnProgress(size_t /*index*/) {};
+
     protected:
         ///
         /// Accessors.
@@ -4489,18 +4502,16 @@ namespace CNTK
         void GetCrossValidationMinibatch(std::unordered_map<Variable, ValuePtr>& minibatch, const DeviceDescriptor& computeDevice);
 
         void RestoreCheckpoint();
-        void SaveCheckpoint(bool last);
-        void CrossValidate(const DeviceDescriptor& computeDevice);
+        void SaveCheckpoint(size_t currentIndex);
+        void SaveFinalCheckpoint();
 
-        inline void PerformCheckPointIfNeeded();
-        inline void PerformCrossValidationIfNeeded(const DeviceDescriptor& computeDevice);
+        void CrossValidate(size_t currentIndex, const DeviceDescriptor& computeDevice);
+        void ReportProgress(size_t currentIndex);
 
         // Checkpointing
-        const size_t m_checkpointFrequencyinSamples;
         const std::wstring m_checkPointFileName;
         const bool m_restoreFromCheckpointIfExists;
         const bool m_saveAllCheckpoints;
-        size_t m_currentCheckpointIndex;
 
         // Training
         MinibatchSourcePtr m_trainingSource;
@@ -4514,8 +4525,8 @@ namespace CNTK
 
         // Cross validation.
         MinibatchSourcePtr m_crossValidationSource;
-        const size_t m_crossValidationFrequencyInSamples;
-        size_t m_currentCrossValidationIndex;
+
+        std::vector<PeriodicAction> m_actions;
     };
 
     CNTK_API TrainingSessionPtr CreateBasicTrainingSession(
