@@ -270,8 +270,11 @@ namespace CNTK
                 newConfig.m_truncationSize = m_truncationLength;
                 newConfig.m_allowMinibatchesToCrossSweepBoundaries = true;
 
-                m_shim->SetCurrentSamplePosition(m_restorePosition);
-                m_restorePosition = 0;
+                if (m_restorePosition != 0)
+                {
+                    m_shim->SetCurrentSamplePosition(m_restorePosition);
+                    m_restorePosition = 0;
+                }
 
                 m_shim->SetConfiguration(newConfig, inputDescriptions);
 
@@ -332,6 +335,10 @@ namespace CNTK
     {
         auto checkpointedMinibatchSourcePosition = checkpoint[PositionAttributeName].Value<size_t>();
         m_shim->SetCurrentSamplePosition(checkpointedMinibatchSourcePosition);
+
+        // Need to reinitialize.
         m_restorePosition = checkpointedMinibatchSourcePosition;
+        m_epochEndReached = false;
+        m_prevMinibatchSize = 0;
     }
 }

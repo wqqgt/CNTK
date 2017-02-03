@@ -19,10 +19,25 @@ class TrainingSession(cntk_py.TrainingSession):
     '''
     def __init__(self, training_minibatch_source, trainer, mb_size_schedule,
                  progress_printer, model_inputs_to_mb_source_mapping, 
-                 checkpoint_frequency, checkpoint_filename):
+                 checkpoint_frequency, checkpoint_filename, save_all_checkpoints, 
+                 restore, progress_frequency, cv_source, cv_frequency, max_samples):
+
         self.progress_printer = progress_printer
-        self.trainer=trainer
-        super(TrainingSession, self).__init__ (training_minibatch_source, trainer, model_inputs_to_mb_source_mapping, mb_size_schedule, checkpoint_frequency, checkpoint_filename)
+        self.trainer=trainer       
+
+        super(TrainingSession, self).__init__ (
+            training_minibatch_source, 
+            trainer, 
+            model_inputs_to_mb_source_mapping, 
+            mb_size_schedule, 
+            checkpoint_frequency, 
+            checkpoint_filename,
+            cv_source,
+            cv_frequency,
+            restore,
+            save_all_checkpoints,
+            max_samples,
+            progress_frequency)
 
     @typemap
     def train(self, device=None):
@@ -42,6 +57,11 @@ class TrainingSession(cntk_py.TrainingSession):
     def on_checkpoint_end(self, index):
         if self.progress_printer:
             self.progress_printer.epoch_summary(with_metric=True)
+
+    def on_cross_validation_end(self, index, average_error, num_samples, num_minibatches):
+        if self.progress_printer:
+            msg = "Cross Validation {} Results: Minibatch[1-{}]: errs = {:0.2f} * {}".format(index, num_minibatches, average_error, num_samples)
+            self.progress_printer.log(msg)
 
 @typemap
 def minibatch_size_schedule(schedule, epoch_size=1):
@@ -88,10 +108,16 @@ def minibatch_size_schedule(schedule, epoch_size=1):
 @typemap
 def training_session(training_minibatch_source,
                      trainer, mb_size_schedule,
-                     progress_printer=None,
-                     model_inputs_to_mb_source_mapping={},
-                     checkpoint_filename=None,
-                     checkpoint_frequency=0):
+                     progress_printer = None,
+                     model_inputs_to_mb_source_mapping = {},
+                     checkpoint_filename = None,
+                     checkpoint_frequency = 0,
+                     save_all_checkpoints = False,
+                     restore = True,
+                     progress_frequency = None,
+                     cv_source = None,
+                     cv_frequency = None,
+                     max_samples = None):
     '''
     Creates a basic training session.
 
@@ -105,6 +131,7 @@ def training_session(training_minibatch_source,
         checkpoint_filename: a file name of the checkpoint file, if None, the checkpointing is disabled.
         checkpoint_frequency: an approximate number of global samples processed accross the workers 
          after which the checkpoint is taken. Should be positive number if the checkpoint file is specified.
+        max_samples: max number of samples after which the training should be stopped
 
     Returns:
         Instance of a :class:`TrainingSession`
@@ -115,12 +142,30 @@ def training_session(training_minibatch_source,
                          '(output of minibatch_size_schedule() function)' 
                          % type(mb_size_schedule))
 
-    if checkpoint_filename==None:
-        checkpoint_frequency=0
+    if checkpoint_filename is None:
+        checkpoint_frequency = 0
         checkpoint_filename=""
+
+    if progress_frequency is None:
+        progress_frequency = 0
+
+    if cv_frequency is None:
+        cv_frequency = 0
+
+    if cv_frequency != 0 and cv_source is None:
+        raise ValueError("Please specify cross validation minibatch source")
+
+    if max_samples is None:
+        max_samples = 0
 
     return TrainingSession(training_minibatch_source, trainer, 
                            mb_size_schedule, progress_printer, 
                            model_inputs_to_mb_source_mapping, 
                            checkpoint_frequency,
-                           checkpoint_filename)
+                           checkpoint_filename,
+                           save_all_checkpoints=save_all_checkpoints,
+                           restore=restore,
+                           progress_frequency=progress_frequency,
+                           cv_source=cv_source,
+                           cv_frequency=cv_frequency,
+                           max_samples=max_samples)

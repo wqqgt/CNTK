@@ -111,6 +111,7 @@ void ReaderShim<ElemType>::SetCurrentSamplePosition(size_t currentSamplePosition
 
     // Set current position.
     m_reader->SetCurrentSamplePosition(currentSamplePosition);
+    m_endOfEpoch = false;
     m_currentSamplePosition = m_reader->GetCurrentSamplePosition();
 }
 

@@ -166,6 +166,7 @@ namespace CNTK
         m_combinedTrainingFunction->Forward(arguments, outputs, computeDevice);
 
         auto sampleCount = GetSampleCount(m_testSampleCountVar, outputs[m_testSampleCountVar]);
+        m_prevMinibatchNumSamples = sampleCount;
         return (GetScalarValue(outputs[m_aggregatedEvaluationFunction]) / sampleCount);
     }
 
@@ -374,6 +375,9 @@ namespace CNTK
 
     double Trainer::PreviousMinibatchLossAverage() const
     {
+        if (m_prevMinibatchNumSamples == 0)
+            RuntimeError("Loss average cannot be calculated if the previous minibatch was empty.");
+
         return (GetScalarValue(m_prevMinibatchAggregateTrainingLossValue) / m_prevMinibatchNumSamples);
     }
 
@@ -381,6 +385,9 @@ namespace CNTK
     {
         if (!m_evaluationFunction)
             InvalidArgument("Trainer::PreviousMinibatchEvaluationAverage: Cannot get evaluation criterion value when no evaluation function was specified during 'this' trainer's construction");
+
+        if (m_prevMinibatchNumSamples == 0)
+            RuntimeError("Evaluation average cannot be calculated if the previous minibatch was empty.");
 
         return (GetScalarValue(m_prevMinibatchAggregateEvalCriterionValue) / m_prevMinibatchNumSamples);
     }

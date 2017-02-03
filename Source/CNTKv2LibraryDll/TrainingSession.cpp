@@ -76,6 +76,12 @@ namespace CNTK
         if (!m_crossValidationSource && crossValidationFrequencyInSamples != 0)
             InvalidArgument("Cross validation minibatch source is not allowed to be empty.");
 
+        if (m_crossValidationSource && crossValidationFrequencyInSamples == 0)
+        {
+            // Run cross validation at the end once.
+            crossValidationFrequencyInSamples = std::numeric_limits<size_t>::max();
+        }
+
         // Let's calculate the warm up period the distributed learners may need.
         // We will take the maximum warm up period required.
         auto learners = trainer->ParameterLearners();
@@ -93,15 +99,15 @@ namespace CNTK
 
         // Fill-in required actions.
         if (checkpointFrequencyInSamples != 0)
-            m_actions.push_back({ checkpointFrequencyInSamples, 0,
+            m_actions.push_back({ checkpointFrequencyInSamples, 0, 0,
                 [this](size_t currentIndex, const DeviceDescriptor&) { SaveCheckpoint(currentIndex); } });
 
         if(crossValidationFrequencyInSamples != 0)
-            m_actions.push_back({ crossValidationFrequencyInSamples, 0,
+            m_actions.push_back({ crossValidationFrequencyInSamples, 0, 0,
                 [this](size_t currentIndex, const DeviceDescriptor& d) { CrossValidate(currentIndex, d); } });
 
         if (progressFrequencyInSamples != 0)
-            m_actions.push_back({ progressFrequencyInSamples, 0,
+            m_actions.push_back({ progressFrequencyInSamples, 0, 0,
                 [this](size_t currentIndex, const DeviceDescriptor&) { ReportProgress(currentIndex); } });
     }
 
@@ -112,7 +118,7 @@ namespace CNTK
 
         // Let's try to restore if required.
         size_t restoredNumberOfSamples = 0;
-        if (m_restoreFromCheckpointIfExists)
+        if (m_restoreFromCheckpointIfExists && !m_checkPointFileName.empty())
         {
             RestoreCheckpoint();
             restoredNumberOfSamples = m_trainer->TotalNumberOfSamplesSeen();
@@ -122,10 +128,10 @@ namespace CNTK
         while (shouldTrain)
         {
             // Get next minibatch.
-            if (m_trainer->TotalNumberOfSamplesSeen() < m_maxNumberOfSamples)
-                GetTrainingMinibatch(minibatch, computeDevice);
-            else
-                minibatch.clear();
+            size_t samplesLeft = m_maxNumberOfSamples > m_trainer->TotalNumberOfSamplesSeen()
+                ? m_maxNumberOfSamples - m_trainer->TotalNumberOfSamplesSeen()
+                : 0;
+            GetTrainingMinibatch(minibatch, samplesLeft, computeDevice);
 
             // Train on the minibatch
             OnMinibatchStart();
@@ -141,6 +147,7 @@ namespace CNTK
                 {
                     action.action(action.currentIndex, computeDevice);
                     action.currentIndex = index;
+                    action.sampleCountWhenLastCalled = totalNumberOfSamples;
                 }
             }
         }
@@ -148,10 +155,11 @@ namespace CNTK
         if (restoredNumberOfSamples != m_trainer->TotalNumberOfSamplesSeen())
         {
             // Let's do all actions on the last probably a partial data at the end.
-            for (size_t i = 0; i < m_actions.size(); i++)
+            for (auto& action: m_actions)
             {
-                if (m_trainer->TotalNumberOfSamplesSeen() % m_actions[i].frequency != 0)
-                    m_actions[i].action(m_actions[i].currentIndex + 1, computeDevice);
+                if (m_trainer->TotalNumberOfSamplesSeen() % action.frequency != 0 &&
+                    m_trainer->TotalNumberOfSamplesSeen() != action.sampleCountWhenLastCalled)
+                    action.action(action.currentIndex, computeDevice);
             }
         }
 
@@ -163,16 +171,23 @@ namespace CNTK
     void TrainingSession::CrossValidate(size_t currentIndex, const DeviceDescriptor& computeDevice)
     {
         std::unordered_map<Variable, ValuePtr> minibatch;
-
         double accumulatedError = 0;
+        double error;
+        size_t totalNumberOfSamples = 0;
         size_t numberOfMinibatches = 0;
+
+        auto checkpoint = m_crossValidationSource->GetCheckpointState();
         while(GetCrossValidationMinibatch(minibatch, computeDevice), !minibatch.empty())
         {
-            accumulatedError += m_trainer->TestMinibatch(minibatch, computeDevice);
+            error = m_trainer->TestMinibatch(minibatch, computeDevice);
+            error *= m_trainer->PreviousMinibatchSampleCount();
+            accumulatedError += error;
+            totalNumberOfSamples += m_trainer->PreviousMinibatchSampleCount();
             numberOfMinibatches++;
         }
+        m_crossValidationSource->RestoreFromCheckpoint(checkpoint);
 
-        OnCrossValidationEnd(currentIndex, accumulatedError/numberOfMinibatches);
+        OnCrossValidationEnd(currentIndex, accumulatedError / totalNumberOfSamples, totalNumberOfSamples, numberOfMinibatches);
     }
 
     inline void TrainingSession::ReportProgress(size_t currentIndex)
@@ -180,7 +195,7 @@ namespace CNTK
         this->OnProgress(currentIndex);
     }
 
-    void TrainingSession::GetTrainingMinibatch(std::unordered_map<Variable, ValuePtr>& minibatch, const DeviceDescriptor& computeDevice)
+    void TrainingSession::GetTrainingMinibatch(std::unordered_map<Variable, ValuePtr>& minibatch, size_t maxMbSize, const DeviceDescriptor& computeDevice)
     {
         size_t workerRank = 0, numberOfWorkers = 1;
 
@@ -191,19 +206,24 @@ namespace CNTK
             workerRank = m_workerRank;
         }
 
-        GetNextMinibatch(m_trainingSource, minibatch, workerRank, numberOfWorkers, computeDevice);
+        GetNextMinibatch(m_trainingSource, minibatch, maxMbSize, workerRank, numberOfWorkers, computeDevice);
     }
 
     void TrainingSession::GetCrossValidationMinibatch(std::unordered_map<Variable, ValuePtr>& minibatch, const DeviceDescriptor& computeDevice)
     {
         // TODO: Support distributed cross-validation, when TestMinibatch supports it.
-        GetNextMinibatch(m_crossValidationSource, minibatch, 0, 1, computeDevice);
+        GetNextMinibatch(m_crossValidationSource, minibatch, std::numeric_limits<size_t>::max(), 0, 1, computeDevice);
     }
 
-    void TrainingSession::GetNextMinibatch(const MinibatchSourcePtr& source, std::unordered_map<Variable, ValuePtr>& minibatch, size_t workerRank, size_t numberOfWorkers, const DeviceDescriptor& computeDevice)
+    void TrainingSession::GetNextMinibatch(const MinibatchSourcePtr& source, std::unordered_map<Variable, ValuePtr>& minibatch, size_t maxMbSize, size_t workerRank, size_t numberOfWorkers, const DeviceDescriptor& computeDevice)
     {
-        size_t mbSize = GetMinibatchSize();
         minibatch.clear();
+
+        size_t mbSize = GetMinibatchSize();
+        mbSize = std::min(mbSize, maxMbSize);
+        if (mbSize == 0)
+            return;
+
         auto minibatchData = source->GetNextMinibatch(0 /*numberOfSequences*/, mbSize, numberOfWorkers, workerRank, computeDevice);
         if (minibatchData.empty())
             return;
@@ -227,7 +247,7 @@ namespace CNTK
         wstring checkpointFile = m_checkPointFileName;
         if (m_saveAllCheckpoints)
             checkpointFile += std::to_wstring(currentIndex);
-        m_trainer->SaveCheckpoint(m_checkPointFileName, externalState);
+        m_trainer->SaveCheckpoint(checkpointFile, externalState);
         OnCheckpointEnd(currentIndex);
     }
 
@@ -240,8 +260,9 @@ namespace CNTK
 
     void TrainingSession::RestoreCheckpoint()
     {
-        using namespace boost::filesystem;
+        assert(!m_checkPointFileName.empty());
 
+        using namespace boost::filesystem;
         // Make sure the intermediate directories exist, so no need for further checks.
         msra::files::make_intermediate_dirs(m_checkPointFileName);
 
@@ -292,6 +313,9 @@ namespace CNTK
         // Recalculate actions indicies.
         size_t totalNumberOfSamples = m_trainer->TotalNumberOfSamplesSeen();
         for (auto& action : m_actions)
+        {
             action.currentIndex = totalNumberOfSamples / action.frequency;
+            action.sampleCountWhenLastCalled = totalNumberOfSamples - totalNumberOfSamples % action.frequency;
+        }
     }
 }
