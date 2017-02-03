@@ -284,7 +284,7 @@ namespace CNTK
                     continue;
                 }
 
-                std::wstring filePath = itr->path().c_str();
+                std::wstring filePath = itr->path().wstring();
                 auto suffix = filePath.substr(m_checkPointFileName.size());
                 if (!isNumber(suffix) || !boost::filesystem::exists(filePath + L".ckp"))
                 {
@@ -292,7 +292,7 @@ namespace CNTK
                 }
 
                 auto expectedNumber = msra::strfun::utf8(suffix);
-                char* tmp;
+                char* tmp = nullptr;
                 int value = strtol(expectedNumber.c_str(), &tmp, 10);
                 assert(tmp == expectedNumber.c_str() + expectedNumber.size());
 
