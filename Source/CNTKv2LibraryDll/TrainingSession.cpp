@@ -4,7 +4,6 @@
 //
 
 #include "stdafx.h"
-#include <boost/filesystem.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 
 #include "CNTKLibrary.h"
@@ -164,7 +163,7 @@ namespace CNTK
         }
 
         // In case of incremental - save final checkpoint.
-        if (m_saveAllCheckpoints && !boost::filesystem::exists(m_checkPointFileName))
+        if (m_saveAllCheckpoints && !fexists(m_checkPointFileName))
             SaveFinalCheckpoint();
     }
 
@@ -262,12 +261,25 @@ namespace CNTK
     {
         assert(!m_checkPointFileName.empty());
 
-        using namespace boost::filesystem;
         // Make sure the intermediate directories exist, so no need for further checks.
         msra::files::make_intermediate_dirs(m_checkPointFileName);
 
+        size_t pos = m_checkPointFileName.find_last_of(L"\\/");
+        wstring parent;
+        wstring fileName;
+        if (pos == wstring::npos || pos == 0)
+        {
+            parent = L"..";
+            fileName = m_checkPointFileName;
+        }
+        else
+        {
+            parent = m_checkPointFileName.substr(0, pos);
+            fileName = m_checkPointFileName.substr(pos);
+        }
+
         std::wstring restoreFile;
-        if (exists(m_checkPointFileName))
+        if (fexists(m_checkPointFileName))
         {
             restoreFile = m_checkPointFileName;
         }
@@ -275,18 +287,17 @@ namespace CNTK
         {
             // let's check whether there are other possible candidates to restore from.
             int maxValue = -1;
-            auto d = wpath(m_checkPointFileName).parent_path();
-            for (directory_iterator itr(d); itr != directory_iterator(); ++itr)
+            std::vector<std::wstring> files = msra::files::get_all_files_from_directory(parent);
+
+            for (auto f : files)
             {
-                if (!is_regular_file(itr->status()) ||
-                    !boost::starts_with(itr->path().c_str(), m_checkPointFileName))
+                if (!boost::starts_with(f, fileName))
                 {
                     continue;
                 }
 
-                std::wstring filePath = itr->path().wstring();
-                auto suffix = filePath.substr(m_checkPointFileName.size());
-                if (!isNumber(suffix) || !boost::filesystem::exists(filePath + L".ckp"))
+                auto suffix = f.substr(fileName.size());
+                if (!isNumber(suffix) || !fexists(parent + L"/" + f + L".ckp"))
                 {
                     continue;
                 }
@@ -300,7 +311,7 @@ namespace CNTK
                 {
                     // Found a better candidate.
                     maxValue = value;
-                    restoreFile = filePath;
+                    restoreFile = parent + L"/" + f;
                 }
             }
         }
